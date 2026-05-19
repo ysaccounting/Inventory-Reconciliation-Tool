@@ -245,7 +245,7 @@ HTML = """
 <body>
   <div class="card">
     <h1>Inventory Reconciliation</h1>
-    <p class="subtitle">Month-end QBO vs TicketVault reconciliation</p>
+    <p class="subtitle">Month-End QBO vs TicketVault reconciliation</p>
 
     <!-- Checks accordion -->
     <div class="checks-toggle" id="checks-toggle">
