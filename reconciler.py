@@ -220,7 +220,19 @@ def parse_ticketvault(filepath_or_buffers):
 
     frames = []
     for buf in filepath_or_buffers:
-        df = pd.read_excel(buf)
+        # Detect CSV vs Excel by peeking at the first bytes
+        if hasattr(buf, 'name') and str(buf.name).lower().endswith('.csv'):
+            is_csv = True
+        elif hasattr(buf, 'read'):
+            first_bytes = buf.read(4)
+            buf.seek(0)
+            is_csv = not first_bytes.startswith(b'PK')  # xlsx files start with PK (zip magic)
+        else:
+            is_csv = str(buf).lower().endswith('.csv')
+        if is_csv:
+            df = pd.read_csv(buf)
+        else:
+            df = pd.read_excel(buf)
         df.columns = [str(c).strip() for c in df.columns]
         frames.append(df)
     df = pd.concat(frames, ignore_index=True)

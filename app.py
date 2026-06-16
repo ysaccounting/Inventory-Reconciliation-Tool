@@ -288,7 +288,7 @@ HTML = """
       <div class="field-group">
         <label class="field-label">TicketVault Purchase Details Report(s)</label>
         <div class="upload-zone" id="tv-zone">
-          <input type="file" name="tv_files" id="tv-input" multiple accept=".xlsx,.xls">
+          <input type="file" name="tv_files" id="tv-input" multiple accept=".xlsx,.xls,.csv">
           <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
             <polyline points="17 8 12 3 7 8"/>
@@ -296,7 +296,7 @@ HTML = """
           </svg>
           <div class="zone-hint">
             Drag &amp; drop your <strong>Excel</strong> files here, or <a href="#">browse</a>
-            <small>One or more Purchase Details exports (.xlsx) — merged automatically</small>
+            <small>One or more Purchase Details exports (.xlsx, .csv) — merged automatically</small>
           </div>
           <div class="file-list" id="tv-file-list"></div>
         </div>
@@ -478,7 +478,9 @@ def run():
                 continue
             raw = f.read()
             tv_input_files.append((f.filename, raw))
-            tv_buffers.append(BytesIO(raw))
+            buf = BytesIO(raw)
+            buf.name = f.filename  # attach filename for CSV detection
+            tv_buffers.append(buf)
 
         tv_recon_df, tv_raw_df = parse_ticketvault(tv_buffers)
 
