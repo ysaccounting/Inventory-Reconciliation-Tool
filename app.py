@@ -14,7 +14,8 @@ from flask import Flask, render_template_string, request, send_file, jsonify
 from reconciler import (
     parse_qbo_consolidated,
     parse_qbo_single,
-    parse_ticketvault,
+    parse_purchase_details,
+    parse_po_cost_changes,
     build_report,
 )
 
@@ -256,11 +257,12 @@ HTML = """
     </div>
     <div class="checks-body" id="checks-body">
       <ol>
-        <li><strong>Daily $ Reconciliation</strong> — QBO Bill totals vs TicketVault Total Cost, grouped by date &amp; company</li>
-        <li><strong>Duplicate Bills (Bill #s)</strong> — Bills or Expenses where the same Company + Bill # appears more than once in QBO</li>
-        <li><strong>Duplicate Bills (Detail)</strong> — Bills or Expenses where Company, Date, Name, Description, and Amount all match</li>
-        <li><strong>Description Mismatch</strong> — Company name in parentheses in the Description field must match the QBO Company column (Bills &amp; Expenses)</li>
-        <li><strong>TV Date Mismatch</strong> — TicketVault rows where the PO Created date does not match the Created date</li>
+        <li><strong>1a. Bills Recon</strong> — QBO Bills vs Purchase Details + positive PO Cost Changes, by date &amp; company</li>
+        <li><strong>1b. Expenses Recon</strong> — QBO Expenses vs negative PO Cost Changes, by date &amp; company</li>
+        <li><strong>1c. Combined Recon</strong> — QBO Bills + Expenses vs all TV activity, by date &amp; company</li>
+        <li><strong>2. Duplicate Bills (Bill #s)</strong> — Same Company + Bill # appears more than once in QBO</li>
+        <li><strong>3. Duplicate Bills (Detail)</strong> — Same Company, Date, Name, Description &amp; Amount in QBO</li>
+        <li><strong>4. Description Mismatches</strong> — Company in parentheses in Description must match QBO Company column</li>
       </ol>
     </div>
 
@@ -284,11 +286,11 @@ HTML = """
         </div>
       </div>
 
-      <!-- TicketVault files -->
+      <!-- Purchase Details files -->
       <div class="field-group">
-        <label class="field-label">TicketVault Purchase Details Report(s)</label>
-        <div class="upload-zone" id="tv-zone">
-          <input type="file" name="tv_files" id="tv-input" multiple accept=".xlsx,.xls,.csv">
+        <label class="field-label">TicketVault Purchase Details</label>
+        <div class="upload-zone" id="pd-zone">
+          <input type="file" name="pd_files" id="pd-input" multiple accept=".xlsx,.xls,.csv">
           <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
             <polyline points="17 8 12 3 7 8"/>
@@ -296,9 +298,27 @@ HTML = """
           </svg>
           <div class="zone-hint">
             Drag &amp; drop your <strong>Excel</strong> files here, or <a href="#">browse</a>
-            <small>One or more Purchase Details exports (.xlsx, .csv) — merged automatically</small>
+            <small>One or more Purchase Details exports (.xlsx) — merged automatically</small>
           </div>
-          <div class="file-list" id="tv-file-list"></div>
+          <div class="file-list" id="pd-file-list"></div>
+        </div>
+      </div>
+
+      <!-- PO Cost Changes files -->
+      <div class="field-group">
+        <label class="field-label">TicketVault PO Cost Changes</label>
+        <div class="upload-zone" id="cc-zone">
+          <input type="file" name="cc_files" id="cc-input" multiple accept=".xlsx,.xls,.csv">
+          <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+          <div class="zone-hint">
+            Drag &amp; drop your <strong>Excel</strong> files here, or <a href="#">browse</a>
+            <small>One or more PO Cost Changes exports (.xlsx) — merged automatically</small>
+          </div>
+          <div class="file-list" id="cc-file-list"></div>
         </div>
       </div>
 
@@ -325,7 +345,8 @@ HTML = """
 
   <script>
     const qboInput  = document.getElementById('qbo-input');
-    const tvInput   = document.getElementById('tv-input');
+    const pdInput   = document.getElementById('pd-input');
+    const ccInput   = document.getElementById('cc-input');
     const runBtn    = document.getElementById('run-btn');
     const clearBtn  = document.getElementById('clear-btn');
 
@@ -349,11 +370,12 @@ HTML = """
     }
 
     function checkReady() {
-      runBtn.disabled = !(qboInput.files.length > 0 && tvInput.files.length > 0);
+      runBtn.disabled = !(qboInput.files.length > 0 && pdInput.files.length > 0 && ccInput.files.length > 0);
     }
 
     qboInput.addEventListener('change', () => renderFileList(qboInput, document.getElementById('qbo-zone'), document.getElementById('qbo-file-list')));
-    tvInput.addEventListener('change',  () => renderFileList(tvInput,  document.getElementById('tv-zone'),  document.getElementById('tv-file-list')));
+    pdInput.addEventListener('change',  () => renderFileList(pdInput,  document.getElementById('pd-zone'),  document.getElementById('pd-file-list')));
+    ccInput.addEventListener('change',  () => renderFileList(ccInput,  document.getElementById('cc-zone'),  document.getElementById('cc-file-list')));
 
     // Drag and drop
     document.querySelectorAll('.upload-zone').forEach(zone => {
@@ -376,12 +398,13 @@ HTML = """
     // Clear button
     clearBtn.addEventListener('click', () => {
       // Reset file inputs
-      [qboInput, tvInput].forEach(input => {
+      [qboInput, pdInput, ccInput].forEach(input => {
         const dt = new DataTransfer();
         input.files = dt.files;
       });
       renderFileList(qboInput, document.getElementById('qbo-zone'), document.getElementById('qbo-file-list'));
-      renderFileList(tvInput,  document.getElementById('tv-zone'),  document.getElementById('tv-file-list'));
+      renderFileList(pdInput,  document.getElementById('pd-zone'),  document.getElementById('pd-file-list'));
+      renderFileList(ccInput,  document.getElementById('cc-zone'),  document.getElementById('cc-file-list'));
       ['status-loading','status-error','status-success'].forEach(id => {
         document.getElementById(id).style.display = 'none';
       });
@@ -463,29 +486,38 @@ def index():
 def run():
     try:
         qbo_files = request.files.getlist('qbo_files')
-        tv_files  = request.files.getlist('tv_files')
+        pd_files  = request.files.getlist('pd_files')
+        cc_files  = request.files.getlist('cc_files')
 
         if not qbo_files or all(f.filename == '' for f in qbo_files):
             return jsonify(error="No QBO files uploaded."), 400
-        if not tv_files or all(f.filename == '' for f in tv_files):
-            return jsonify(error="No TicketVault files uploaded."), 400
+        if not pd_files or all(f.filename == '' for f in pd_files):
+            return jsonify(error="No Purchase Details files uploaded."), 400
+        if not cc_files or all(f.filename == '' for f in cc_files):
+            return jsonify(error="No PO Cost Changes files uploaded."), 400
 
-        # Read all TV file bytes; merge into one via parse_ticketvault
-        tv_input_files = []
-        tv_buffers = []
-        for f in tv_files:
-            if f.filename == '':
-                continue
+        # Parse Purchase Details
+        pd_input_files = []
+        pd_buffers = []
+        for f in pd_files:
+            if f.filename == '': continue
             raw = f.read()
-            tv_input_files.append((f.filename, raw))
-            buf = BytesIO(raw)
-            buf.name = f.filename  # attach filename for CSV detection
-            tv_buffers.append(buf)
+            pd_input_files.append((f.filename, raw))
+            pd_buffers.append(BytesIO(raw))
+        pd_recon_df, pd_raw_df = parse_purchase_details(pd_buffers)
 
-        tv_recon_df, tv_raw_df = parse_ticketvault(tv_buffers)
+        # Parse PO Cost Changes
+        cc_input_files = []
+        cc_buffers = []
+        for f in cc_files:
+            if f.filename == '': continue
+            raw = f.read()
+            cc_input_files.append((f.filename, raw))
+            cc_buffers.append(BytesIO(raw))
+        cc_recon_df, cc_raw_df = parse_po_cost_changes(cc_buffers)
 
         # Collect input file bytes for embedding in output
-        input_files = tv_input_files[:]
+        input_files = pd_input_files[:] + cc_input_files[:]
 
         # Parse all QBO files and combine
         qbo_frames = []
@@ -522,7 +554,7 @@ def run():
             period_label = ''
 
         report_bytes = build_report(
-            qbo_df, tv_recon_df, tv_raw_df=tv_raw_df,
+            qbo_df, pd_recon_df, pd_raw_df, cc_recon_df, cc_raw_df,
             period_label=period_label, input_files=input_files
         )
 
