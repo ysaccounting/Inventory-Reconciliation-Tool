@@ -1,34 +1,35 @@
 """
-Inventory Reconciliation Engine
-Handles QBO (consolidated + single-company) vs TicketVault comparison.
+Inventory Reconciliation Engine v2
+QBO vs TicketVault (Purchase Details + PO Cost Changes)
 """
 
 import re
 import pandas as pd
 from io import BytesIO
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import (
-    PatternFill, Font, Alignment, Border, Side, numbers
-)
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+# ---------------------------------------------------------------------------
+# Company mapping: QBO Company -> list of TV Company Names
+# ---------------------------------------------------------------------------
 COMPANY_MAPPING = {
     "Damona & Crew":      ["Damon and Crew"],
-    "The Ticket Guy LLC": ["The Ticket Guy"],
-    "Y&S Tickets":        ["YS Tickets", "YS-SeatGeek2", "YS-Seatgeek", "YS Tickets Spec"],
+    "The Ticket Guy LLC": ["The Ticket Guy", "Ticket Guy"],
+    "Y&S Tickets":        ["YS Tickets", "YS-SeatGeek2", "YS-Seatgeek", "YS Tickets Spec", "YS-Seatgeek2"],
     "YourTickets":        ["YourTickets"],
     "YS Asher Tickets":   ["YSA", "YSA 2", "YSA 3"],
-    "YS Chase Tickets":   ["Jacks YS"],
+    "YS Chase Tickets":   ["Jacks YS", "Chase (Jacks)"],
     "YS Katz Tickets":    ["YS Katz"],
     "YS Levine Tickets":  ["Yoni Levine"],
     "YS Levovitz Tickets":["Levovitz"],
     "YS Needle Tickets":  ["Needle Tickets LLC"],
     "YS TL Tickets":      ["YS TL"],
-    "YSKG Tickets":       ["GK LLC"],
+    "YSKG Tickets":       ["GK LLC", "YSKG"],
     "YSM Tickets":        ["YSM Tickets"],
     "YSP Tickets":        ["Pollak Tickets"],
     "YSS Tickets":        ["YSS Tickets"],
-    "YSW Tickets":        ["YSW"],
+    "YSW Tickets":        ["YSW", "YSW (Waxler)"],
 }
 
 TV_TO_QBO = {}
@@ -42,7 +43,9 @@ for _qbo, _tv_list in COMPANY_MAPPING.items():
         DESC_TO_QBO[_tv.strip().lower()] = _qbo
     DESC_TO_QBO[_qbo.strip().lower()] = _qbo
 
-
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 def _extract_desc_company(description):
     if not description or pd.isna(description):
         return None
@@ -70,11 +73,9 @@ def _fmt_date(val):
     except:
         return ''
 
-
 # ---------------------------------------------------------------------------
 # QBO Parsing
 # ---------------------------------------------------------------------------
-
 def parse_qbo_consolidated(filepath_or_buffer):
     raw = pd.read_excel(filepath_or_buffer, header=None)
     header_row = None
@@ -112,7 +113,6 @@ def parse_qbo_consolidated(filepath_or_buffer):
     df = df[df['qbo_company'].notna() & (df['qbo_company'].astype(str).str.strip() != '')]
     df = df[df['date'].notna()]
     df = df[~df['qbo_company'].astype(str).str.strip().str.lower().isin(['company','beginning balance',''])]
-    # Drop rows with no transaction type (#4)
     df = df[df['transaction_type'].notna()]
     df = df[~df['transaction_type'].astype(str).str.strip().str.lower().isin(['nan','none',''])]
 
@@ -127,7 +127,6 @@ def parse_qbo_consolidated(filepath_or_buffer):
 
 def parse_qbo_single(filepath_or_buffer, filename=''):
     raw = pd.read_excel(filepath_or_buffer, header=None)
-
     company_name = None
     for i in range(5):
         val = str(raw.iloc[i, 0]).strip()
@@ -149,7 +148,6 @@ def parse_qbo_single(filepath_or_buffer, filename=''):
 
     df = pd.read_excel(filepath_or_buffer, header=header_row)
     df.columns = [str(c).strip() for c in df.columns]
-
     first_col = df.columns[0]
     has_txn_type_col = any('transaction type' in c.lower() for c in df.columns)
 
@@ -166,7 +164,6 @@ def parse_qbo_single(filepath_or_buffer, filename=''):
     if 'date' not in col_map:
         raise ValueError(f"Could not find 'Transaction date' column for '{company_name}'.")
 
-    # #5 — Infer transaction_type from col A section headers
     if not has_txn_type_col:
         txn_types = []
         current_type = 'Unknown'
@@ -175,7 +172,7 @@ def parse_qbo_single(filepath_or_buffer, filename=''):
             v = str(val).strip()
             if v.lower() in known_types:
                 current_type = v.title()
-                txn_types.append(None)  # section header row — dropped later
+                txn_types.append(None)
             else:
                 txn_types.append(current_type)
         df['transaction_type'] = txn_types
@@ -183,8 +180,6 @@ def parse_qbo_single(filepath_or_buffer, filename=''):
 
     df['qbo_company'] = company_name
     df = df.rename(columns={v: k for k, v in col_map.items()})
-
-    # #5 — Remove original column A (section label column)
     if first_col in df.columns and first_col not in ('transaction_type','date','num','name','description','amount','qbo_company'):
         df = df.drop(columns=[first_col])
 
@@ -195,7 +190,6 @@ def parse_qbo_single(filepath_or_buffer, filename=''):
 
     df = df[df['date'].notna()]
     df = df[~df['date'].astype(str).str.strip().str.lower().isin(['nan','none','transaction date','beginning balance',''])]
-    # Drop rows with no transaction type (#4)
     df = df[df['transaction_type'].notna()]
     df = df[~df['transaction_type'].astype(str).str.strip().str.lower().isin(['nan','none','','unknown'])]
 
@@ -209,47 +203,32 @@ def parse_qbo_single(filepath_or_buffer, filename=''):
     return df
 
 
-def parse_ticketvault(filepath_or_buffers):
+# ---------------------------------------------------------------------------
+# TV Parsing
+# ---------------------------------------------------------------------------
+def parse_purchase_details(filepath_or_buffers):
     """
-    Parse one or more TV Purchase Details files. Returns (recon_df, raw_df).
-    recon_df is grouped by company+date for reconciliation.
-    raw_df is the full merged cleaned dataframe (for tab display and check4).
+    Parse Purchase Details file(s) — uses the 'All' tab.
+    Returns (recon_df, raw_df).
+    recon_df: company, date, total_cost grouped for reconciliation.
+    raw_df: full cleaned dataframe for output tab.
     """
     if not isinstance(filepath_or_buffers, list):
         filepath_or_buffers = [filepath_or_buffers]
 
     frames = []
     for buf in filepath_or_buffers:
-        # Detect CSV vs Excel by peeking at the first bytes
-        if hasattr(buf, 'name') and str(buf.name).lower().endswith('.csv'):
-            is_csv = True
-        elif hasattr(buf, 'read'):
-            first_bytes = buf.read(4)
-            buf.seek(0)
-            is_csv = not first_bytes.startswith(b'PK')  # xlsx files start with PK (zip magic)
-        else:
-            is_csv = str(buf).lower().endswith('.csv')
-        if is_csv:
-            df = pd.read_csv(buf)
-        else:
+        try:
+            df = pd.read_excel(buf, sheet_name='All')
+        except:
             df = pd.read_excel(buf)
         df.columns = [str(c).strip() for c in df.columns]
         frames.append(df)
+
     df = pd.concat(frames, ignore_index=True)
 
-    if 'Cancelled' in df.columns:
-        df = df[df['Cancelled'].astype(str).str.strip().str.lower() != 'yes']
-
-    # #2 — Remove unwanted columns
-    for col in ['Delivery Type', 'Notes', 'Tags']:
-        if col in df.columns:
-            df = df.drop(columns=[col])
-
-    # #3 — Format all date columns as date-only
-    for col in ['PO Created', 'Event Date', 'Created']:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors='coerce').dt.normalize()
-
+    # Normalize date
+    df['PO Created'] = pd.to_datetime(df['PO Created'], errors='coerce').dt.normalize()
     df['tv_company'] = df['Company'].astype(str).str.strip()
     df['total_cost'] = pd.to_numeric(df['Total Cost'], errors='coerce').fillna(0)
     df['qbo_company'] = df['tv_company'].apply(_map_tv_to_qbo)
@@ -263,25 +242,128 @@ def parse_ticketvault(filepath_or_buffers):
     return recon_df, raw_df
 
 
+def parse_po_cost_changes(filepath_or_buffers):
+    """
+    Parse PO Cost Changes file(s) — uses the 'Combined' tab.
+    Positive amounts = Bills, negative = Expenses.
+    Returns (recon_df, raw_df).
+    """
+    if not isinstance(filepath_or_buffers, list):
+        filepath_or_buffers = [filepath_or_buffers]
+
+    frames = []
+    for buf in filepath_or_buffers:
+        try:
+            df = pd.read_excel(buf, sheet_name='Combined')
+        except:
+            df = pd.read_excel(buf)
+        df.columns = [str(c).strip() for c in df.columns]
+        frames.append(df)
+
+    df = pd.concat(frames, ignore_index=True)
+
+    # Date column is 'Date'
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.normalize()
+    df['tv_company'] = df['Company'].astype(str).str.strip()
+
+    # Amount column is 'Total'
+    df['total'] = pd.to_numeric(df['Total'], errors='coerce').fillna(0)
+    df['qbo_company'] = df['tv_company'].apply(_map_tv_to_qbo)
+
+    raw_df = df.copy()
+
+    recon_df = df[['tv_company','qbo_company','Date','total']].copy()
+    recon_df = recon_df.rename(columns={'Date': 'date', 'total': 'amount'})
+    recon_df = recon_df.dropna(subset=['date'])
+
+    return recon_df, raw_df
+
+
 # ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
 
-def check1_daily_reconciliation(qbo_df, tv_recon_df):
-    bills = qbo_df[qbo_df['transaction_type'].str.lower() == 'bill'].copy()
-    qbo_grouped = bills.groupby(['qbo_company','date'])['amount'].sum().reset_index().rename(columns={'amount':'qbo_total'})
-    tv_grouped = tv_recon_df.groupby(['qbo_company','date'])['total_cost'].sum().reset_index().rename(columns={'total_cost':'tv_total'})
-    merged = pd.merge(qbo_grouped, tv_grouped, on=['qbo_company','date'], how='outer').fillna(0)
+def _build_recon(qbo_left, tv_right, qbo_amount_col='amount', tv_amount_col='amount'):
+    """Generic daily recon: group both sides by company+date and merge."""
+    qbo_g = qbo_left.groupby(['qbo_company','date'])[qbo_amount_col].sum().reset_index().rename(columns={qbo_amount_col:'qbo_total'})
+    tv_g  = tv_right.groupby(['qbo_company','date'])[tv_amount_col].sum().reset_index().rename(columns={tv_amount_col:'tv_total'})
+    merged = pd.merge(qbo_g, tv_g, on=['qbo_company','date'], how='outer').fillna(0)
     merged['variance'] = merged['qbo_total'] - merged['tv_total']
-    merged['match'] = merged['variance'].abs() <= 1.00
+    merged['match'] = merged['variance'].abs() <= 100.00
+    return merged.sort_values(['qbo_company','date'])
 
-    unmapped = tv_recon_df[tv_recon_df['qbo_company'].isna()][['tv_company','date','total_cost']].copy()
-    unmapped = unmapped.groupby(['tv_company','date'])['total_cost'].sum().reset_index()
-    return merged.sort_values(['qbo_company','date']), unmapped
+
+def check1a_bills_recon(qbo_df, pd_recon_df, cc_recon_df):
+    """
+    1a — Bills: QBO Bills vs (Purchase Details + PO Cost Changes positives).
+    """
+    qbo_bills = qbo_df[qbo_df['transaction_type'].str.lower() == 'bill'].copy()
+
+    # TV Bills = Purchase Details + positive PO Cost Changes
+    tv_pd = pd_recon_df[['qbo_company','date','total_cost']].copy().rename(columns={'total_cost':'amount'})
+    tv_cc_pos = cc_recon_df[cc_recon_df['amount'] > 0][['qbo_company','date','amount']].copy()
+    tv_bills = pd.concat([tv_pd, tv_cc_pos], ignore_index=True)
+    tv_bills = tv_bills[tv_bills['qbo_company'].notna()]
+
+    result = _build_recon(qbo_bills, tv_bills)
+
+    # Unmapped TV companies
+    unmapped_pd = pd_recon_df[pd_recon_df['qbo_company'].isna()][['tv_company','date','total_cost']].rename(columns={'total_cost':'amount'})
+    unmapped_cc = cc_recon_df[(cc_recon_df['qbo_company'].isna()) & (cc_recon_df['amount'] > 0)][['tv_company','date','amount']]
+    unmapped = pd.concat([unmapped_pd, unmapped_cc], ignore_index=True)
+    unmapped = unmapped.groupby(['tv_company','date'])['amount'].sum().reset_index()
+
+    return result, unmapped
+
+
+def check1b_expenses_recon(qbo_df, cc_recon_df):
+    """
+    1b — Expenses: QBO Expenses vs PO Cost Changes negatives.
+    """
+    qbo_expenses = qbo_df[qbo_df['transaction_type'].str.lower() == 'expense'].copy()
+
+    # TV Expenses = negative PO Cost Changes (negate to make positive for comparison)
+    tv_exp = cc_recon_df[cc_recon_df['amount'] < 0][['qbo_company','date','amount']].copy()
+    tv_exp['amount'] = tv_exp['amount'].abs()
+    tv_exp = tv_exp[tv_exp['qbo_company'].notna()]
+
+    # QBO expense amounts are typically negative — negate for comparison
+    qbo_expenses = qbo_expenses.copy()
+    qbo_expenses['amount_abs'] = qbo_expenses['amount'].abs()
+
+    qbo_g = qbo_expenses.groupby(['qbo_company','date'])['amount_abs'].sum().reset_index().rename(columns={'amount_abs':'qbo_total'})
+    tv_g  = tv_exp.groupby(['qbo_company','date'])['amount'].sum().reset_index().rename(columns={'amount':'tv_total'})
+    merged = pd.merge(qbo_g, tv_g, on=['qbo_company','date'], how='outer').fillna(0)
+    merged['variance'] = merged['qbo_total'] - merged['tv_total']
+    merged['match'] = merged['variance'].abs() <= 100.00
+    return merged.sort_values(['qbo_company','date'])
+
+
+def check1c_combined_recon(qbo_df, pd_recon_df, cc_recon_df):
+    """
+    1c — Combined: QBO (Bills + Expenses) vs all TV activity.
+    QBO expenses are negative; TV expenses (negative CC) are also negative — sum all.
+    """
+    qbo_be = qbo_df[qbo_df['transaction_type'].str.lower().isin(['bill','expense'])].copy()
+
+    # TV combined = Purchase Details (positive) + PO Cost Changes (positive and negative)
+    tv_pd = pd_recon_df[['qbo_company','date','total_cost']].copy().rename(columns={'total_cost':'amount'})
+    tv_cc = cc_recon_df[['qbo_company','date','amount']].copy()
+    tv_all = pd.concat([tv_pd, tv_cc], ignore_index=True)
+    tv_all = tv_all[tv_all['qbo_company'].notna()]
+
+    result = _build_recon(qbo_be, tv_all)
+
+    unmapped_pd = pd_recon_df[pd_recon_df['qbo_company'].isna()][['tv_company','date','total_cost']].rename(columns={'total_cost':'amount'})
+    unmapped_cc = cc_recon_df[cc_recon_df['qbo_company'].isna()][['tv_company','date','amount']]
+    unmapped = pd.concat([unmapped_pd, unmapped_cc], ignore_index=True)
+    unmapped = unmapped.groupby(['tv_company','date'])['amount'].sum().reset_index()
+
+    return result, unmapped
 
 
 def check2_duplicate_bills(qbo_df):
-    """2a: Same Company + Bill # + Amount."""
+    """2a: Same Company + Bill # (any transaction type)."""
     txns = qbo_df[qbo_df['transaction_type'].str.lower().isin(['bill','expense'])].copy()
     txns = txns[txns['num'].notna() & (txns['num'] != '') & (txns['num'].str.lower() != 'nan')]
     dupes = txns[txns.duplicated(subset=['qbo_company','num'], keep=False)].copy()
@@ -303,33 +385,22 @@ def check3_description_mismatch(qbo_df):
     relevant['desc_company_raw'] = relevant['description'].apply(_extract_desc_company)
     relevant['desc_qbo_mapped'] = relevant['desc_company_raw'].apply(lambda x: _map_desc_to_qbo(x) if x else None)
 
+    # Only flag rows where the text in parentheses IS a recognized company name
+    # (i.e. desc_qbo_mapped is not None) but maps to a DIFFERENT QBO company
+    # Rows where the parentheses text is not a known company name are ignored
     mismatches = relevant[
         relevant['desc_company_raw'].notna() &
         relevant['desc_qbo_mapped'].notna() &
         (relevant['desc_qbo_mapped'].str.lower() != relevant['qbo_company'].str.lower())
     ].copy()
-    mismatches['mismatch_reason'] = 'Expected: ' + mismatches['desc_qbo_mapped'] + ' | Got (Company col): ' + mismatches['qbo_company']
+    mismatches['mismatch_reason'] = 'Expected: ' + mismatches['desc_qbo_mapped'] + ' | Got: ' + mismatches['qbo_company']
 
-    unmappable = relevant[relevant['desc_company_raw'].notna() & relevant['desc_qbo_mapped'].isna()].copy()
-    unmappable['mismatch_reason'] = 'Description company not in mapping'
-
-    return pd.concat([mismatches, unmappable], ignore_index=True).sort_values(['qbo_company','date'])
-
-
-def check4_po_vs_created(tv_raw_df):
-    """Rows where PO Created date != Created date."""
-    if 'PO Created' not in tv_raw_df.columns or 'Created' not in tv_raw_df.columns:
-        return pd.DataFrame()
-    df = tv_raw_df.copy()
-    po = pd.to_datetime(df['PO Created'], errors='coerce').dt.normalize()
-    cr = pd.to_datetime(df['Created'], errors='coerce').dt.normalize()
-    return df[po.notna() & cr.notna() & (po != cr)].copy()
+    return mismatches.sort_values(['qbo_company','date'])
 
 
 # ---------------------------------------------------------------------------
-# Excel Report Builder
+# Excel Styles
 # ---------------------------------------------------------------------------
-
 RED_FILL    = PatternFill("solid", fgColor="FFCCCC")
 GREEN_FILL  = PatternFill("solid", fgColor="CCFFCC")
 ORANGE_FILL = PatternFill("solid", fgColor="FFE0B2")
@@ -356,16 +427,56 @@ def _auto_width(ws, min_w=10, max_w=60):
         ws.column_dimensions[col_letter].width = min(max_w, max(min_w, header_len + 3, max_len + 2))
 
 
+def _write_recon_sheet(ws, recon_df, unmapped_df, qbo_label, tv_label):
+    """Write a standard reconciliation sheet (1a/1b/1c)."""
+    headers = ["QBO Company", "Date", f"QBO {qbo_label} ($)", f"TV {tv_label} ($)", "Variance ($)", "Status"]
+    for c, h in enumerate(headers, 1): ws.cell(1, c, h)
+    _style_header(ws, 1, len(headers))
+    ws.row_dimensions[1].height = 22
+
+    for r, row in enumerate(recon_df.itertuples(), 2):
+        ws.cell(r, 1, row.qbo_company).font = NORMAL_FONT
+        ws.cell(r, 2, _fmt_date(row.date)).font = NORMAL_FONT
+        ws.cell(r, 3, round(row.qbo_total, 2)).number_format = '$#,##0.00'
+        ws.cell(r, 4, round(row.tv_total, 2)).number_format = '$#,##0.00'
+        ws.cell(r, 5, round(row.variance, 2)).number_format = '$#,##0.00'
+        qbo_zero = abs(row.qbo_total) < 0.02
+        tv_zero  = abs(row.tv_total)  < 0.02
+        if row.match:
+            label, fill = "Match", GREEN_FILL
+        elif qbo_zero or tv_zero:
+            label, fill = "Missing", RED_FILL
+        else:
+            label, fill = "Discrepancy", ORANGE_FILL
+        ws.cell(r, 6, label).font = NORMAL_FONT
+        for c in range(1, 7): ws.cell(r, c).fill = fill
+
+    if unmapped_df is not None and len(unmapped_df) > 0:
+        start = len(recon_df) + 3
+        ws.cell(start, 1, "⚠️ Unmapped TV Companies").font = Font(bold=True, color="CC6600", name="Calibri", size=10)
+        ws.merge_cells(f"A{start}:F{start}")
+        for c, h in enumerate(["TV Company","Date","TV Total ($)"], 1): ws.cell(start+1, c, h)
+        _style_header(ws, start+1, 3, fill=SUB_FILL)
+        for r2, row2 in enumerate(unmapped_df.itertuples(), start+2):
+            ws.cell(r2, 1, row2.tv_company).font = NORMAL_FONT
+            ws.cell(r2, 2, _fmt_date(row2.date)).font = NORMAL_FONT
+            ws.cell(r2, 3, round(row2.amount, 2)).number_format = '$#,##0.00'
+            for c in range(1, 4): ws.cell(r2, c).fill = ORANGE_FILL
+
+    _auto_width(ws)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:F{len(recon_df)+1}"
+
+
 def _write_dupes_sheet(ws, df, headers, col_fns):
     if len(df) == 0:
         ws["A1"] = "No duplicates found."
         ws["A1"].font = Font(bold=True, color="006600", name="Calibri", size=12)
         return
-    for c, h in enumerate(headers, 1):
-        ws.cell(1, c, h)
+    for c, h in enumerate(headers, 1): ws.cell(1, c, h)
     _style_header(ws, 1, len(headers))
     ws.row_dimensions[1].height = 22
-    amt_col = len(col_fns)  # last column is always Amount
+    amt_col = len(col_fns)
     for r, row in enumerate(df.itertuples(), 2):
         for c, fn in enumerate(col_fns, 1):
             cell = ws.cell(r, c, fn(row))
@@ -377,123 +488,105 @@ def _write_dupes_sheet(ws, df, headers, col_fns):
     ws.auto_filter.ref = ws.dimensions
 
 
-def build_report(qbo_df, tv_recon_df, tv_raw_df=None, period_label="", input_files=None):
+def _write_raw_tv_sheet(ws, df, date_cols, money_cols, drop_cols=None):
+    """Write a raw TV dataframe to a sheet with date/money formatting."""
+    if drop_cols:
+        df = df.drop(columns=[c for c in drop_cols if c in df.columns])
+    # Drop internal helper columns
+    cols = [c for c in df.columns if not c.startswith('_') and c not in ('tv_company','total_cost','qbo_company','total','amount')]
+    for c, h in enumerate(cols, 1): ws.cell(1, c, h)
+    _style_header(ws, 1, len(cols))
+    ws.row_dimensions[1].height = 22
+    for r, row in enumerate(df[cols].itertuples(index=False), 2):
+        for c, (col_name, val) in enumerate(zip(cols, row), 1):
+            if col_name in date_cols:
+                ws.cell(r, c, _fmt_date(val)).font = NORMAL_FONT
+            elif col_name in money_cols:
+                cell = ws.cell(r, c, val)
+                cell.number_format = '$#,##0.00'
+                cell.font = NORMAL_FONT
+            else:
+                ws.cell(r, c, val if val is not None and str(val) != 'nan' else '').font = NORMAL_FONT
+    # Header-width columns for TV tabs
+    for col in ws.columns:
+        col_letter = get_column_letter(col[0].column)
+        header_len = len(str(col[0].value)) if col[0].value else 10
+        ws.column_dimensions[col_letter].width = header_len + 3
+    ws.freeze_panes = "A2"
+    if len(df) > 0: ws.auto_filter.ref = ws.dimensions
+
+
+# ---------------------------------------------------------------------------
+# Report Builder
+# ---------------------------------------------------------------------------
+def build_report(qbo_df, pd_recon_df, pd_raw_df, cc_recon_df, cc_raw_df,
+                 period_label="", input_files=None):
     wb = Workbook()
 
-    recon_df, unmapped_tv    = check1_daily_reconciliation(qbo_df, tv_recon_df)
-    dupes_df                 = check2_duplicate_bills(qbo_df)
-    dupes2_df                = check2b_duplicate_bills_detail(qbo_df)
-    mismatch_df              = check3_description_mismatch(qbo_df)
-    po_mismatch_df           = check4_po_vs_created(tv_raw_df if tv_raw_df is not None else pd.DataFrame())
+    # Run all checks
+    recon_1a, unmapped_1a = check1a_bills_recon(qbo_df, pd_recon_df, cc_recon_df)
+    recon_1b             = check1b_expenses_recon(qbo_df, cc_recon_df)
+    recon_1c, unmapped_1c = check1c_combined_recon(qbo_df, pd_recon_df, cc_recon_df)
+    dupes_df             = check2_duplicate_bills(qbo_df)
+    dupes2_df            = check2b_duplicate_bills_detail(qbo_df)
+    mismatch_df          = check3_description_mismatch(qbo_df)
 
-    # ── Summary tab ────────────────────────────────────────────────────────
+    # ── Summary ─────────────────────────────────────────────────────────────
     ws_sum = wb.active
     ws_sum.title = "Summary"
-    SUMMARY_FILL  = PatternFill("solid", fgColor="EEF2FA")
+    SUMMARY_FILL = PatternFill("solid", fgColor="EEF2FA")
     SUMMARY_ITEMS = [
         ("Tab", "What it checks", "Flag criteria"),
-        ("1. Daily Reconciliation",
-         "Compares daily QBO Bill totals per company against TicketVault daily Total Cost (by PO Created date).",
-         "Match (green) = within $1.00  |  Missing (red) = one side is $0  |  Discrepancy (orange) = both sides have $ but differ by more than $1.00"),
-        ("2. Duplicate Bills (Bill #s)",
-         "Finds QBO Bills or Expenses where the same Company + Bill/Expense # appears more than once.",
-         "Any Company + Bill # combination that appears 2 or more times"),
-        ("3. Duplicate Bills (Detail)",
-         "Finds QBO Bills or Expenses where the same Company, Date, Name, Description, and Amount all match.",
-         "All five fields must match across two or more rows"),
-        ("4. Description Mismatches",
-         "For Bills and Expenses, checks that the company name in parentheses at the end of the Description field matches the QBO Company column.",
-         "Company in parentheses maps to a different QBO company, or is not found in the mapping at all"),
-        ("5. TV Date Mismatch",
-         "Flags TicketVault purchase rows where the PO Created date does not match the Created date.",
-         "PO Created date ≠ Created date (date portion only, time ignored)"),
+        ("1a. Bills Recon", "QBO Bills vs TicketVault Purchase Details + positive PO Cost Changes, grouped by date & company.", "Match (green) = within $100  |  Missing (red) = one side is $0  |  Discrepancy (orange) = both have $ but differ by more than $100"),
+        ("1b. Expenses Recon", "QBO Expenses vs negative PO Cost Changes (absolute values compared), grouped by date & company.", "Same color logic as above"),
+        ("1c. Combined Recon", "QBO Bills + Expenses vs all TV activity (Purchase Details + PO Cost Changes), grouped by date & company.", "Same color logic as above"),
+        ("2. Duplicate Bills (Bill #s)", "Bills or Expenses where the same Company + Bill # appears more than once in QBO.", "Any Company + Bill # combination appearing 2 or more times"),
+        ("3. Duplicate Bills (Detail)", "Bills or Expenses where Company, Date, Name, Description, and Amount all match.", "All five fields must match across two or more rows"),
+        ("4. Description Mismatches", "For Bills and Expenses, checks that the company in parentheses in the Description matches the QBO Company column. Only flags when the parentheses text is a recognized company name.", "Company in parentheses maps to a different QBO company than the Company column"),
     ]
-    col_widths = [28, 70, 70]
-    ws_sum.column_dimensions['A'].width = col_widths[0]
-    ws_sum.column_dimensions['B'].width = col_widths[1]
-    ws_sum.column_dimensions['C'].width = col_widths[2]
+    ws_sum.column_dimensions['A'].width = 28
+    ws_sum.column_dimensions['B'].width = 80
+    ws_sum.column_dimensions['C'].width = 55
     for r, (tab, desc, criteria) in enumerate(SUMMARY_ITEMS, 1):
         for c, val in enumerate([tab, desc, criteria], 1):
             cell = ws_sum.cell(r, c, val)
-            cell.alignment = Alignment(wrap_text=True, vertical='top')
+            cell.alignment = Alignment(wrap_text=False, vertical='center')
             if r == 1:
                 cell.fill = HEADER_FILL
                 cell.font = WHITE_FONT
-                cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                cell.alignment = Alignment(horizontal='center', vertical='center')
             else:
                 cell.fill = SUMMARY_FILL if r % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
                 cell.font = BOLD_FONT if c == 1 else NORMAL_FONT
-        ws_sum.row_dimensions[r].height = 60 if r > 1 else 22
-    ws_sum.row_dimensions[1].height = 22
+        ws_sum.row_dimensions[r].height = 20
 
-    # ── 1. Daily Reconciliation ─────────────────────────────────────────────
-    ws1 = wb.create_sheet("1. Daily Reconciliation")
-    headers1 = ["QBO Company", "Date", "QBO Bills Total ($)", "TV Total Cost ($)", "Variance ($)", "Status"]
-    for c, h in enumerate(headers1, 1): ws1.cell(1, c, h)
-    _style_header(ws1, 1, len(headers1))
-    ws1.row_dimensions[1].height = 22
+    # ── 1a. Bills Recon ─────────────────────────────────────────────────────
+    ws1a = wb.create_sheet("1a. Bills Recon")
+    _write_recon_sheet(ws1a, recon_1a, unmapped_1a, "Bills Total", "Bills Total")
 
-    for r, row in enumerate(recon_df.itertuples(), 2):
-        ws1.cell(r, 1, row.qbo_company).font = NORMAL_FONT
-        ws1.cell(r, 2, _fmt_date(row.date)).font = NORMAL_FONT
-        ws1.cell(r, 3, round(row.qbo_total, 2)).number_format = '$#,##0.00'
-        ws1.cell(r, 4, round(row.tv_total, 2)).number_format = '$#,##0.00'
-        ws1.cell(r, 5, round(row.variance, 2)).number_format = '$#,##0.00'
-        qbo_zero = abs(row.qbo_total) < 0.02
-        tv_zero  = abs(row.tv_total)  < 0.02
-        if row.match:
-            label, fill = "Match", GREEN_FILL
-        elif qbo_zero or tv_zero:
-            label, fill = "Missing", RED_FILL
-        else:
-            label, fill = "Discrepancy", ORANGE_FILL
-        ws1.cell(r, 6, label).font = NORMAL_FONT
-        for c in range(1, 7): ws1.cell(r, c).fill = fill
+    # ── 1b. Expenses Recon ──────────────────────────────────────────────────
+    ws1b = wb.create_sheet("1b. Expenses Recon")
+    _write_recon_sheet(ws1b, recon_1b, None, "Expenses Total", "Cost Changes Total")
 
-    if len(unmapped_tv) > 0:
-        start = len(recon_df) + 3
-        ws1.cell(start, 1, "⚠️ Unmapped TicketVault Companies (no QBO mapping found)").font = Font(bold=True, color="CC6600", name="Calibri", size=10)
-        ws1.merge_cells(f"A{start}:F{start}")
-        for c, h in enumerate(["TV Company","Date","TV Total Cost ($)"], 1): ws1.cell(start+1, c, h)
-        _style_header(ws1, start+1, 3, fill=SUB_FILL)
-        for r2, row2 in enumerate(unmapped_tv.itertuples(), start+2):
-            ws1.cell(r2, 1, row2.tv_company).font = NORMAL_FONT
-            ws1.cell(r2, 2, _fmt_date(row2.date)).font = NORMAL_FONT
-            ws1.cell(r2, 3, round(row2.total_cost, 2)).number_format = '$#,##0.00'
-            for c in range(1, 4): ws1.cell(r2, c).fill = ORANGE_FILL
+    # ── 1c. Combined Recon ──────────────────────────────────────────────────
+    ws1c = wb.create_sheet("1c. Combined Recon")
+    _write_recon_sheet(ws1c, recon_1c, unmapped_1c, "Bills + Expenses", "All TV Activity")
 
-    _auto_width(ws1)
-    ws1.freeze_panes = "A2"
-    ws1.auto_filter.ref = f"A1:F{len(recon_df)+1}"
-
-    # ── 2. Duplicate Bills (2a: Company + Bill # + Amount) ──────────────────
+    # ── 2. Duplicate Bills (Bill #s) ────────────────────────────────────────
     ws2 = wb.create_sheet("2. Duplicate Bills (Bill #s)")
-    h2 = ["QBO Company","Transaction Type","Bill / Expense #","Date","Name","Description","Amount ($)"]
-    _write_dupes_sheet(ws2, dupes_df, h2, [
-        lambda r: r.qbo_company,
-        lambda r: r.transaction_type,
-        lambda r: _clean_num(r.num),
-        lambda r: _fmt_date(r.date),
-        lambda r: str(r.name) if pd.notna(r.name) else '',
-        lambda r: str(r.description) if pd.notna(r.description) else '',
-        lambda r: round(r.amount, 2),
-    ])
-    if len(dupes_df) > 0:
-        for r2 in range(2, ws2.max_row+1):
-            ws2.cell(r2, 7).number_format = '$#,##0.00'
+    _write_dupes_sheet(ws2, dupes_df,
+        ["QBO Company","Transaction Type","Bill / Expense #","Date","Name","Description","Amount ($)"],
+        [lambda r: r.qbo_company, lambda r: r.transaction_type, lambda r: _clean_num(r.num),
+         lambda r: _fmt_date(r.date), lambda r: str(r.name) if pd.notna(r.name) else '',
+         lambda r: str(r.description) if pd.notna(r.description) else '', lambda r: round(r.amount, 2)])
 
-    # ── 3. Duplicate Bills Detail (2b: Company + Date + Name + Desc + Amount) ─
+    # ── 3. Duplicate Bills (Detail) ─────────────────────────────────────────
     ws3 = wb.create_sheet("3. Duplicate Bills (Detail)")
-    h3 = ["QBO Company","Transaction Type","Date","Bill / Expense #","Name","Description","Amount ($)"]
-    _write_dupes_sheet(ws3, dupes2_df, h3, [
-        lambda r: r.qbo_company,
-        lambda r: r.transaction_type,
-        lambda r: _fmt_date(r.date),
-        lambda r: _clean_num(r.num),
-        lambda r: str(r.name) if pd.notna(r.name) else '',
-        lambda r: str(r.description) if pd.notna(r.description) else '',
-        lambda r: round(r.amount, 2),
-    ])
+    _write_dupes_sheet(ws3, dupes2_df,
+        ["QBO Company","Transaction Type","Date","Bill / Expense #","Name","Description","Amount ($)"],
+        [lambda r: r.qbo_company, lambda r: r.transaction_type, lambda r: _fmt_date(r.date),
+         lambda r: _clean_num(r.num), lambda r: str(r.name) if pd.notna(r.name) else '',
+         lambda r: str(r.description) if pd.notna(r.description) else '', lambda r: round(r.amount, 2)])
 
     # ── 4. Description Mismatches ───────────────────────────────────────────
     ws4 = wb.create_sheet("4. Description Mismatches")
@@ -517,125 +610,43 @@ def build_report(qbo_df, tv_recon_df, tv_raw_df=None, period_label="", input_fil
     ws4.freeze_panes = "A2"
     if len(mismatch_df) > 0: ws4.auto_filter.ref = ws4.dimensions
 
-    # ── 5. TV PO Created vs Created Date Mismatch ───────────────────────────
-    ws5 = wb.create_sheet("5. TV Date Mismatch")
-    DATE_COLS = {'PO Created','Event Date','Created'}
-    MONEY_COLS = {'Cost','Total Cost'}
-    if len(po_mismatch_df) == 0:
-        ws5["A1"] = "No PO Created vs Created date mismatches found."
-        ws5["A1"].font = Font(bold=True, color="006600", name="Calibri", size=12)
-    else:
-        tv_cols = [c for c in po_mismatch_df.columns if not c.startswith('_') and c not in ('tv_company','total_cost','qbo_company')]
-        for c, h in enumerate(tv_cols, 1): ws5.cell(1, c, h)
-        _style_header(ws5, 1, len(tv_cols))
-        ws5.row_dimensions[1].height = 22
-        for r, row in enumerate(po_mismatch_df[tv_cols].itertuples(index=False), 2):
-            for c, (col_name, val) in enumerate(zip(tv_cols, row), 1):
-                if col_name in DATE_COLS:
-                    ws5.cell(r, c, _fmt_date(val)).font = NORMAL_FONT
-                elif col_name in MONEY_COLS:
-                    cell = ws5.cell(r, c, val)
-                    cell.number_format = '$#,##0.00'
-                    cell.font = NORMAL_FONT
-                else:
-                    ws5.cell(r, c, val if val != '' else None).font = NORMAL_FONT
-    # Header-only column widths for TV date mismatch tab
-    for col in ws5.columns:
-        col_letter = get_column_letter(col[0].column)
-        header_len = len(str(col[0].value)) if col[0].value else 10
-        ws5.column_dimensions[col_letter].width = header_len + 3
-    ws5.freeze_panes = "A2"
-    if len(po_mismatch_df) > 0: ws5.auto_filter.ref = ws5.dimensions
+    # ── TV - Purchase Details (raw) ─────────────────────────────────────────
+    ws_pd = wb.create_sheet("TV - Purchase Details")
+    _write_raw_tv_sheet(ws_pd, pd_raw_df,
+        date_cols={'PO Created'},
+        money_cols={'Total Cost'})
 
-    # ── Input file tabs ─────────────────────────────────────────────────────
-    if input_files:
-        DATE_COLS_TV = {'PO Created', 'Event Date', 'Created'}
-        MONEY_COLS_TV = {'Cost', 'Total Cost'}
-        REMOVE_COLS_TV = {'Delivery Type', 'Notes', 'Tags'}
+    # ── TV - PO Cost Changes (raw) ──────────────────────────────────────────
+    ws_cc = wb.create_sheet("TV - PO Cost Changes")
+    _write_raw_tv_sheet(ws_cc, cc_raw_df,
+        date_cols={'Date'},
+        money_cols={'Total'})
 
-        tv_input_files = [(f, b) for f, b in input_files if 'purchase' in f.lower() or 'ticketvault' in f.lower()]
-        qbo_input_files = [(f, b) for f, b in input_files if f not in [x[0] for x in tv_input_files]]
+    # ── QBO - Bills ─────────────────────────────────────────────────────────
+    QBO_HEADERS = ["Company","Transaction Type","Transaction Date","Num","Name","Description","Amount ($)"]
+    def _write_qbo_tab(ws, df_subset):
+        for c, h in enumerate(QBO_HEADERS, 1): ws.cell(1, c, h)
+        _style_header(ws, 1, len(QBO_HEADERS))
+        ws.row_dimensions[1].height = 22
+        for r, row in enumerate(df_subset.itertuples(), 2):
+            ws.cell(r, 1, row.qbo_company).font = NORMAL_FONT
+            ws.cell(r, 2, row.transaction_type).font = NORMAL_FONT
+            ws.cell(r, 3, _fmt_date(row.date)).font = NORMAL_FONT
+            ws.cell(r, 4, _clean_num(row.num)).font = NORMAL_FONT
+            ws.cell(r, 5, str(row.name) if pd.notna(row.name) else '').font = NORMAL_FONT
+            ws.cell(r, 6, str(row.description) if pd.notna(row.description) else '').font = NORMAL_FONT
+            cell = ws.cell(r, 7, round(row.amount, 2))
+            cell.number_format = '$#,##0.00'
+            cell.font = NORMAL_FONT
+        _auto_width(ws, max_w=60)
+        ws.freeze_panes = "A2"
+        if len(df_subset) > 0: ws.auto_filter.ref = ws.dimensions
 
-        # ── Merged TV Purchases tab ──────────────────────────────────────────
-        if tv_input_files:
-            ws_tv = wb.create_sheet("TV - Purchases")
-            tv_all_rows = []
-            tv_headers = None
-            for fname, fbytes in tv_input_files:
-                try:
-                    src_wb = load_workbook(BytesIO(fbytes), read_only=True, data_only=True)
-                    src_ws = src_wb.active
-                    rows = list(src_ws.iter_rows(values_only=True))
-                    if not rows:
-                        src_wb.close()
-                        continue
-                    # Find which column indices to keep (remove Delivery Type, Notes, Tags)
-                    header = [str(v).strip() if v is not None else '' for v in rows[0]]
-                    keep_idx = [i for i, h in enumerate(header) if h not in REMOVE_COLS_TV]
-                    filtered_header = [header[i] for i in keep_idx]
-                    if tv_headers is None:
-                        tv_headers = filtered_header
-                    for row_vals in rows[1:]:
-                        tv_all_rows.append([row_vals[i] if i < len(row_vals) else None for i in keep_idx])
-                    src_wb.close()
-                except Exception as e:
-                    pass
-
-            if tv_headers:
-                for c, h in enumerate(tv_headers, 1):
-                    ws_tv.cell(1, c, h)
-                _style_header(ws_tv, 1, len(tv_headers))
-                ws_tv.row_dimensions[1].height = 22
-                for r, row_vals in enumerate(tv_all_rows, 2):
-                    for c, (col_name, val) in enumerate(zip(tv_headers, row_vals), 1):
-                        if col_name in DATE_COLS_TV:
-                            ws_tv.cell(r, c, _fmt_date(val)).font = NORMAL_FONT
-                        elif col_name in MONEY_COLS_TV:
-                            cell = ws_tv.cell(r, c, val)
-                            cell.number_format = '$#,##0.00'
-                            cell.font = NORMAL_FONT
-                        else:
-                            ws_tv.cell(r, c, val if val is not None else '').font = NORMAL_FONT
-            # Header-only column widths for TV tab
-            for col in ws_tv.columns:
-                col_letter = get_column_letter(col[0].column)
-                header_len = len(str(col[0].value)) if col[0].value else 10
-                ws_tv.column_dimensions[col_letter].width = header_len + 3
-            ws_tv.freeze_panes = "A2"
-            ws_tv.auto_filter.ref = ws_tv.dimensions
-
-        # ── QBO Bills + Expenses tabs (no Journal Entries) ─────────────────
-        QBO_OUT_HEADERS = ["Company", "Transaction Type", "Transaction Date", "Num", "Name", "Description", "Amount ($)"]
-
-        def _write_qbo_tab(ws, df_subset):
-            for c, h in enumerate(QBO_OUT_HEADERS, 1):
-                ws.cell(1, c, h)
-            _style_header(ws, 1, len(QBO_OUT_HEADERS))
-            ws.row_dimensions[1].height = 22
-            for r, row in enumerate(df_subset.itertuples(), 2):
-                ws.cell(r, 1, row.qbo_company).font = NORMAL_FONT
-                ws.cell(r, 2, row.transaction_type).font = NORMAL_FONT
-                ws.cell(r, 3, _fmt_date(row.date)).font = NORMAL_FONT
-                ws.cell(r, 4, _clean_num(row.num)).font = NORMAL_FONT
-                ws.cell(r, 5, str(row.name) if pd.notna(row.name) else '').font = NORMAL_FONT
-                ws.cell(r, 6, str(row.description) if pd.notna(row.description) else '').font = NORMAL_FONT
-                cell = ws.cell(r, 7, round(row.amount, 2))
-                cell.number_format = '$#,##0.00'
-                cell.font = NORMAL_FONT
-            _auto_width(ws, max_w=60)
-            ws.freeze_panes = "A2"
-            if len(df_subset) > 0:
-                ws.auto_filter.ref = ws.dimensions
-
-        qbo_excl_je = qbo_df[~qbo_df['transaction_type'].str.lower().isin(['journal entry'])]
-        qbo_bills    = qbo_excl_je[qbo_excl_je['transaction_type'].str.lower() == 'bill']
-        qbo_expenses = qbo_excl_je[qbo_excl_je['transaction_type'].str.lower() != 'bill']
-
-        ws_qbo_b = wb.create_sheet("QBO - Bills")
-        _write_qbo_tab(ws_qbo_b, qbo_bills)
-
-        ws_qbo_e = wb.create_sheet("QBO - Expenses")
-        _write_qbo_tab(ws_qbo_e, qbo_expenses)
+    qbo_excl_je = qbo_df[~qbo_df['transaction_type'].str.lower().isin(['journal entry'])]
+    ws_qbo_b = wb.create_sheet("QBO - Bills")
+    _write_qbo_tab(ws_qbo_b, qbo_excl_je[qbo_excl_je['transaction_type'].str.lower() == 'bill'])
+    ws_qbo_e = wb.create_sheet("QBO - Expenses")
+    _write_qbo_tab(ws_qbo_e, qbo_excl_je[qbo_excl_je['transaction_type'].str.lower() != 'bill'])
 
     out = BytesIO()
     wb.save(out)
