@@ -297,8 +297,7 @@ HTML = """
             <line x1="12" y1="3" x2="12" y2="15"/>
           </svg>
           <div class="zone-hint">
-            Drag &amp; drop your <strong>Excel</strong> files here, or <a href="#">browse</a>
-            <small>One or more Purchase Details exports (.xlsx) — merged automatically</small>
+            Drag &amp; drop your <strong>Excel</strong> files here, or <a href="#">browse</a>            
           </div>
           <div class="file-list" id="pd-file-list"></div>
         </div>
@@ -315,8 +314,7 @@ HTML = """
             <line x1="12" y1="3" x2="12" y2="15"/>
           </svg>
           <div class="zone-hint">
-            Drag &amp; drop your <strong>Excel</strong> files here, or <a href="#">browse</a>
-            <small>One or more PO Cost Changes exports (.xlsx) — merged automatically</small>
+            Drag &amp; drop your <strong>Excel</strong> files here, or <a href="#">browse</a>            
           </div>
           <div class="file-list" id="cc-file-list"></div>
         </div>
