@@ -298,7 +298,7 @@ HTML = """
       <!-- Purchase Details files -->
       <div class="field-group">
         <label class="field-label">TicketVault Purchase Details</label>
-        <span class="field-sublabel">Load the full month's data puller purchase details files into Zone 2 of the Purchase Details App, then load the Combined Output file here.</span>
+        <span class="field-sublabel">Load the full month's data puller purchase details files into Zone 2 of the Purchase Details app, then load the Combined output file here.</span>
         <div class="upload-zone" id="pd-zone">
           <input type="file" name="pd_files" id="pd-input" multiple accept=".xlsx,.xls,.csv">
           <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -316,7 +316,7 @@ HTML = """
       <!-- PO Cost Changes files -->
       <div class="field-group">
         <label class="field-label">TicketVault PO Cost Changes</label>
-        <span class="field-sublabel">Load the full month's PO cost changes data puller files into Zone 2 of the PO Cost Changes App, then load the Combined Output file here.</span>
+        <span class="field-sublabel">Load the full month's PO cost changes data puller files into Zone 2 of the PO Cost Changes app, then load the Combined output file here.</span>
         <div class="upload-zone" id="cc-zone">
           <input type="file" name="cc_files" id="cc-input" multiple accept=".xlsx,.xls,.csv">
           <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
