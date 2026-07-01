@@ -83,7 +83,7 @@ HTML = """
       display: block;
     }
     .field-sublabel {
-      font-size: 0.68rem;
+      font-size: 0.76rem;
       font-weight: 400;
       text-transform: none;
       letter-spacing: 0;
@@ -308,7 +308,6 @@ HTML = """
           </svg>
           <div class="zone-hint">
             Drag &amp; drop your <strong>Excel</strong> files here, or <a href="#">browse</a>
-            <small>One or more Purchase Details exports (.xlsx) — merged automatically</small>
           </div>
           <div class="file-list" id="pd-file-list"></div>
         </div>
@@ -327,7 +326,6 @@ HTML = """
           </svg>
           <div class="zone-hint">
             Drag &amp; drop your <strong>Excel</strong> files here, or <a href="#">browse</a>
-            <small>One or more PO Cost Changes exports (.xlsx) — merged automatically</small>
           </div>
           <div class="file-list" id="cc-file-list"></div>
         </div>
