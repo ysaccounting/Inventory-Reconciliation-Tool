@@ -670,34 +670,7 @@ def build_report(qbo_df, pd_recon_df, pd_raw_df, cc_recon_df, cc_raw_df,
     if dm_buffers:
         dm_df = parse_po_date_mismatch(dm_buffers)
         ws_dm = wb.create_sheet("5. PO Date Mismatch")
-        if len(dm_df) == 0:
-            ws_dm["A1"] = "No PO Created vs Created/Listing Created date mismatches found."
-            ws_dm["A1"].font = Font(bold=True, color="006600", name="Calibri", size=12)
-        else:
-            second_col_name = dm_df['_second_col_name'].iloc[0] if '_second_col_name' in dm_df.columns else 'Created'
-            DATE_COLS_DM = {'PO Created', 'Event Date', second_col_name}
-            MONEY_COLS_DM = {'Cost', 'Total Cost'}
-            drop_cols = {'_po_date', '_2nd_date', '_second_col_name', 'tv_company', 'total_cost', 'qbo_company'}
-            out_cols = [c for c in dm_df.columns if c not in drop_cols]
-            for c, h in enumerate(out_cols, 1): ws_dm.cell(1, c, h)
-            _style_header(ws_dm, 1, len(out_cols))
-            ws_dm.row_dimensions[1].height = 22
-            for r, row in enumerate(dm_df[out_cols].itertuples(index=False), 2):
-                for c, (col_name, val) in enumerate(zip(out_cols, row), 1):
-                    if col_name in DATE_COLS_DM:
-                        ws_dm.cell(r, c, _fmt_date(val)).font = NORMAL_FONT
-                    elif col_name in MONEY_COLS_DM:
-                        cell = ws_dm.cell(r, c, val)
-                        cell.number_format = '$#,##0.00'
-                        cell.font = NORMAL_FONT
-                    else:
-                        ws_dm.cell(r, c, val if val is not None and str(val) != 'nan' else '').font = NORMAL_FONT
-            for col in ws_dm.columns:
-                col_letter = get_column_letter(col[0].column)
-                header_len = len(str(col[0].value)) if col[0].value else 10
-                ws_dm.column_dimensions[col_letter].width = header_len + 3
-            ws_dm.freeze_panes = "A2"
-            ws_dm.auto_filter.ref = ws_dm.dimensions
+        _write_date_mismatch_sheet(ws_dm, dm_df)
 
     # ── QBO - Bills ─────────────────────────────────────────────────────────
     QBO_HEADERS = ["Company","Transaction Type","Transaction Date","Num","Name","Description","Amount ($)"]
@@ -724,6 +697,60 @@ def build_report(qbo_df, pd_recon_df, pd_raw_df, cc_recon_df, cc_raw_df,
     _write_qbo_tab(ws_qbo_b, qbo_excl_je[qbo_excl_je['transaction_type'].str.lower() == 'bill'])
     ws_qbo_e = wb.create_sheet("QBO - Expenses")
     _write_qbo_tab(ws_qbo_e, qbo_excl_je[qbo_excl_je['transaction_type'].str.lower() != 'bill'])
+
+    out = BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out
+
+def _write_date_mismatch_sheet(ws, dm_df):
+    """Shared writer for the PO Date Mismatch sheet."""
+    if dm_df is None or len(dm_df) == 0:
+        ws["A1"] = "No PO Created vs Created/Listing Created date mismatches found."
+        ws["A1"].font = Font(bold=True, color="006600", name="Calibri", size=12)
+        return
+
+    second_col_name = dm_df['_second_col_name'].iloc[0] if '_second_col_name' in dm_df.columns else 'Created'
+    DATE_COLS_DM = {'PO Created', 'Event Date', second_col_name}
+    MONEY_COLS_DM = {'Cost', 'Total Cost'}
+    drop_cols = {'_po_date', '_2nd_date', '_second_col_name', 'tv_company', 'total_cost', 'qbo_company'}
+    out_cols = [c for c in dm_df.columns if c not in drop_cols]
+
+    for c, h in enumerate(out_cols, 1):
+        ws.cell(1, c, h)
+    _style_header(ws, 1, len(out_cols))
+    ws.row_dimensions[1].height = 22
+
+    for r, row in enumerate(dm_df[out_cols].itertuples(index=False), 2):
+        for c, (col_name, val) in enumerate(zip(out_cols, row), 1):
+            if col_name in DATE_COLS_DM:
+                ws.cell(r, c, _fmt_date(val)).font = NORMAL_FONT
+            elif col_name in MONEY_COLS_DM:
+                cell = ws.cell(r, c, val)
+                cell.number_format = '$#,##0.00'
+                cell.font = NORMAL_FONT
+            else:
+                ws.cell(r, c, val if val is not None and str(val) != 'nan' else '').font = NORMAL_FONT
+
+    for col in ws.columns:
+        col_letter = get_column_letter(col[0].column)
+        header_len = len(str(col[0].value)) if col[0].value else 10
+        ws.column_dimensions[col_letter].width = header_len + 3
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+
+def build_date_mismatch_report(dm_buffers):
+    """
+    Standalone report: PO Created vs Created / Listing Created date mismatches only.
+    Used when the user uploads only the date-mismatch zone.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "PO Date Mismatch"
+
+    dm_df = parse_po_date_mismatch(dm_buffers)
+    _write_date_mismatch_sheet(ws, dm_df)
 
     out = BytesIO()
     wb.save(out)

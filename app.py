@@ -17,6 +17,7 @@ from reconciler import (
     parse_purchase_details,
     parse_po_cost_changes,
     build_report,
+    build_date_mismatch_report,
 )
 
 app = Flask(__name__)
@@ -398,7 +399,9 @@ HTML = """
     }
 
     function checkReady() {
-      runBtn.disabled = !(qboInput.files.length > 0 && pdInput.files.length > 0 && ccInput.files.length > 0);
+      const fullSet = qboInput.files.length > 0 && pdInput.files.length > 0 && ccInput.files.length > 0;
+      const dmOnly  = dmInput.files.length > 0;
+      runBtn.disabled = !(fullSet || dmOnly);
     }
 
     qboInput.addEventListener('change', () => renderFileList(qboInput, document.getElementById('qbo-zone'), document.getElementById('qbo-file-list')));
@@ -518,12 +521,38 @@ def run():
         qbo_files = request.files.getlist('qbo_files')
         pd_files  = request.files.getlist('pd_files')
         cc_files  = request.files.getlist('cc_files')
+        dm_files  = request.files.getlist('dm_files')
 
-        if not qbo_files or all(f.filename == '' for f in qbo_files):
+        has_qbo = bool(qbo_files) and any(f.filename != '' for f in qbo_files)
+        has_pd  = bool(pd_files)  and any(f.filename != '' for f in pd_files)
+        has_cc  = bool(cc_files)  and any(f.filename != '' for f in cc_files)
+        has_dm  = bool(dm_files)  and any(f.filename != '' for f in dm_files)
+
+        # ── PO Date Mismatch only mode ─────────────────────────────────────
+        if has_dm and not (has_qbo or has_pd or has_cc):
+            dm_buffers = []
+            for f in dm_files:
+                if f.filename == '': continue
+                raw = f.read()
+                buf = BytesIO(raw)
+                buf.name = f.filename
+                dm_buffers.append(buf)
+
+            report_bytes = build_date_mismatch_report(dm_buffers)
+            filename = f"PO Date Mismatch {datetime.now().strftime('%B %Y')}.xlsx"
+            return send_file(
+                report_bytes,
+                mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                as_attachment=True,
+                download_name=filename
+            )
+
+        # ── Full reconciliation mode — requires all three ──────────────────
+        if not has_qbo:
             return jsonify(error="No QBO files uploaded."), 400
-        if not pd_files or all(f.filename == '' for f in pd_files):
+        if not has_pd:
             return jsonify(error="No Purchase Details files uploaded."), 400
-        if not cc_files or all(f.filename == '' for f in cc_files):
+        if not has_cc:
             return jsonify(error="No PO Cost Changes files uploaded."), 400
 
         # Parse Purchase Details
@@ -547,7 +576,6 @@ def run():
         cc_recon_df, cc_raw_df = parse_po_cost_changes(cc_buffers)
 
         # Parse optional PO Date Mismatch files
-        dm_files = request.files.getlist('dm_files')
         dm_buffers = []
         dm_input_files = []
         for f in dm_files:
