@@ -272,7 +272,7 @@ HTML = """
         <li><strong>1c. Combined Recon</strong> — QBO Bills + Expenses vs all TV activity, by date &amp; company</li>
         <li><strong>2. Duplicate Bills (Bill #s)</strong> — Same Company + Bill # appears more than once in QBO</li>
         <li><strong>3. Duplicate Bills (Detail)</strong> — Same Company, Date, Name, Description &amp; Amount in QBO</li>
-        <li><strong>4. Description Mismatches</strong> — Company in parentheses in Description must match QBO Company column</li>
+        <li><strong>4. Description es</strong> — Company in parentheses in Description must match QBO Company column</li>
       </ol>
     </div>
 
@@ -334,8 +334,8 @@ HTML = """
 
       <!-- PO Date Mismatch files -->
       <div class="field-group">
-        <label class="field-label">TicketVault PO Date Mismatch Check</label>
-        <span class="field-sublabel">Optional. Upload a Purchase Details file (.xlsx or .csv) to flag rows where PO Created date differs from Created / Listing Created date.</span>
+        <label class="field-label">PO Created vs Lising Created Date Discrepancies</label>
+        <span class="field-sublabel">Optional. Load purchase details files to flag rows where PO Created date differs from Listing Created date.</span>
         <div class="upload-zone" id="dm-zone">
           <input type="file" name="dm_files" id="dm-input" multiple accept=".xlsx,.xls,.csv">
           <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
