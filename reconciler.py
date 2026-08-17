@@ -279,6 +279,50 @@ def parse_po_cost_changes(filepath_or_buffers):
     return recon_df, raw_df
 
 
+def parse_po_date_mismatch(filepath_or_buffers):
+    """
+    Parse one or more Purchase Details files (CSV or XLSX).
+    Detects whether second date column is 'Created' or 'Listing Created'.
+    Returns rows where PO Created DATE differs from the other date column DATE.
+    Same date, different time = OK (not flagged).
+    """
+    if not isinstance(filepath_or_buffers, list):
+        filepath_or_buffers = [filepath_or_buffers]
+
+    frames = []
+    for buf in filepath_or_buffers:
+        fname = getattr(buf, 'name', '')
+        if fname.lower().endswith('.csv'):
+            df = pd.read_csv(buf)
+        else:
+            df = pd.read_excel(buf)
+        df.columns = [str(c).strip() for c in df.columns]
+
+        # Detect second date column
+        if 'Listing Created' in df.columns:
+            second_col = 'Listing Created'
+        elif 'Created' in df.columns:
+            second_col = 'Created'
+        else:
+            continue  # no matching column
+
+        df['_po_date'] = pd.to_datetime(df['PO Created'], errors='coerce').dt.normalize()
+        df['_2nd_date'] = pd.to_datetime(df[second_col], errors='coerce').dt.normalize()
+        df['_second_col_name'] = second_col
+
+        mismatches = df[
+            df['_po_date'].notna() &
+            df['_2nd_date'].notna() &
+            (df['_po_date'] != df['_2nd_date'])
+        ].copy()
+        frames.append(mismatches)
+
+    if not frames:
+        return pd.DataFrame()
+
+    return pd.concat(frames, ignore_index=True)
+
+
 # ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
@@ -520,7 +564,7 @@ def _write_raw_tv_sheet(ws, df, date_cols, money_cols, drop_cols=None):
 # Report Builder
 # ---------------------------------------------------------------------------
 def build_report(qbo_df, pd_recon_df, pd_raw_df, cc_recon_df, cc_raw_df,
-                 period_label="", input_files=None):
+                 period_label="", input_files=None, dm_buffers=None):
     wb = Workbook()
 
     # Run all checks
@@ -621,6 +665,39 @@ def build_report(qbo_df, pd_recon_df, pd_raw_df, cc_recon_df, cc_raw_df,
     _write_raw_tv_sheet(ws_cc, cc_raw_df,
         date_cols={'Date'},
         money_cols={'Total'})
+
+    # ── 5. PO Date Mismatch tab (optional) ─────────────────────────────────
+    if dm_buffers:
+        dm_df = parse_po_date_mismatch(dm_buffers)
+        ws_dm = wb.create_sheet("5. PO Date Mismatch")
+        if len(dm_df) == 0:
+            ws_dm["A1"] = "No PO Created vs Created/Listing Created date mismatches found."
+            ws_dm["A1"].font = Font(bold=True, color="006600", name="Calibri", size=12)
+        else:
+            second_col_name = dm_df['_second_col_name'].iloc[0] if '_second_col_name' in dm_df.columns else 'Created'
+            DATE_COLS_DM = {'PO Created', 'Event Date', second_col_name}
+            MONEY_COLS_DM = {'Cost', 'Total Cost'}
+            drop_cols = {'_po_date', '_2nd_date', '_second_col_name', 'tv_company', 'total_cost', 'qbo_company'}
+            out_cols = [c for c in dm_df.columns if c not in drop_cols]
+            for c, h in enumerate(out_cols, 1): ws_dm.cell(1, c, h)
+            _style_header(ws_dm, 1, len(out_cols))
+            ws_dm.row_dimensions[1].height = 22
+            for r, row in enumerate(dm_df[out_cols].itertuples(index=False), 2):
+                for c, (col_name, val) in enumerate(zip(out_cols, row), 1):
+                    if col_name in DATE_COLS_DM:
+                        ws_dm.cell(r, c, _fmt_date(val)).font = NORMAL_FONT
+                    elif col_name in MONEY_COLS_DM:
+                        cell = ws_dm.cell(r, c, val)
+                        cell.number_format = '$#,##0.00'
+                        cell.font = NORMAL_FONT
+                    else:
+                        ws_dm.cell(r, c, val if val is not None and str(val) != 'nan' else '').font = NORMAL_FONT
+            for col in ws_dm.columns:
+                col_letter = get_column_letter(col[0].column)
+                header_len = len(str(col[0].value)) if col[0].value else 10
+                ws_dm.column_dimensions[col_letter].width = header_len + 3
+            ws_dm.freeze_panes = "A2"
+            ws_dm.auto_filter.ref = ws_dm.dimensions
 
     # ── QBO - Bills ─────────────────────────────────────────────────────────
     QBO_HEADERS = ["Company","Transaction Type","Transaction Date","Num","Name","Description","Amount ($)"]
