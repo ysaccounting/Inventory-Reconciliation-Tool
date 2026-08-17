@@ -334,7 +334,7 @@ HTML = """
 
       <!-- PO Date Mismatch files -->
       <div class="field-group">
-        <label class="field-label">PO Created vs Lising Created Date Discrepancies</label>
+        <label class="field-label">PO Created vs Listing Created Date Discrepancies</label>
         <span class="field-sublabel">Optional. Load purchase details files to flag rows where PO Created date differs from Listing Created date.</span>
         <div class="upload-zone" id="dm-zone">
           <input type="file" name="dm_files" id="dm-input" multiple accept=".xlsx,.xls,.csv">
